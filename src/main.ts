@@ -1,7 +1,6 @@
 import * as THREE from "three";
 
-// Data and visualization
-import { CompositionShader } from "./shaders/CompositionShader.js";
+import { CompositionShader } from "./shaders/CompositionShader";
 import {
   BASE_LAYER,
   BLOOM_LAYER,
@@ -10,26 +9,30 @@ import {
 } from "./config/renderConfig.js";
 
 // Rendering
-import { MapControls } from "three/addons/controls/OrbitControls.js";
+import { MapControls } from 'three/examples/jsm/controls/MapControls';
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass";
+import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass";
+import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass";
+import { GUI } from 'dat.gui'
+import { Galaxy } from "./galaxy";
 
-import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
-import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
-import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
-import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
-import { Galaxy } from "./galaxy.js";
 
-let canvas,
-  renderer,
-  camera,
-  scene,
-  orbit,
-  baseComposer,
-  bloomComposer,
-  overlayComposer;
+let canvas: HTMLCanvasElement | null,
+  renderer: THREE.Renderer,
+  camera: THREE.PerspectiveCamera,
+  scene: THREE.Scene,
+  orbit: THREE.MapControls,
+  baseComposer: THREE.EffectComposer,
+  bloomComposer: THREE.EffectComposer,
+  overlayComposer: THREE.EffectComposer,
+  cameraFolder: GUI,
+  gui: GUI;
 
 function initThree() {
   // grab canvas
   canvas = document.querySelector("#canvas");
+  
 
   // scene
   scene = new THREE.Scene();
@@ -42,7 +45,7 @@ function initThree() {
     0.1,
     5000000
   );
-  camera.position.set(0, 50, 50);
+  camera.position.set(450, -500, 650);
   camera.up.set(0, 0, 1);
   camera.lookAt(0, 0, 0);
 
@@ -55,7 +58,19 @@ function initThree() {
   orbit.maxDistance = 16384;
   orbit.maxPolarAngle = Math.PI / 2 - Math.PI / 360;
 
+  gui = new GUI();
+  gui.close();
+  cameraFolder = gui.addFolder("Camera");
+  cameraFolder.add(camera.position, "x", -1000, 1000).listen();
+  cameraFolder.add(camera.position, "y", -1000, 1000).listen();
+  cameraFolder.add(camera.position, "z", -1000, 1000).listen();
+
   initRenderPipeline();
+}
+
+function animate() {
+  orbit.update();
+  renderer.render( scene, camera );
 }
 
 function initRenderPipeline() {
@@ -68,6 +83,7 @@ function initRenderPipeline() {
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.setAnimationLoop(animate);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 0.5;
 
@@ -118,7 +134,7 @@ function initRenderPipeline() {
   baseComposer.addPass(finalPass);
 }
 
-function resizeRendererToDisplaySize(renderer) {
+function resizeRendererToDisplaySize(renderer: THREE.Renderer) {
   const canvas = renderer.domElement;
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
@@ -173,9 +189,7 @@ function renderPipeline() {
 }
 
 initThree();
-let axes = new THREE.AxesHelper(5.0);
-scene.add(axes);
 
-let galaxy = new Galaxy(scene);
+let galaxy = new Galaxy(scene, gui);
 
 requestAnimationFrame(render);

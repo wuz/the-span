@@ -1,16 +1,65 @@
 import * as THREE from "three";
-import { Star } from "./star";
 import { gaussianRandom, spiral } from "./utils";
-import { Haze } from "./haze";
-import type { GUI } from "dat.gui"; 
-import { Sector } from "./sectors";
+import type { GUI } from "dat.gui";
+import { ZoneMap } from "./sectors";
 
-//galaxy class
+export const starTypes = {
+  percentage: [76.45, 12.1, 7.6, 3.0, 0.6, 0.13],
+  color:      [0xdbf656, 0xffd2a1, 0xfff4ea, 0xf8f7ff, 0xcad7ff, 0xaabfff],
+  size:       [0.7,     0.7,     1.15,    1.48,    2.0,     2.5],
+};
+
+function pickStarType(): number {
+  const rand = Math.random() * 100;
+  let cumulative = 0;
+  for (let i = 0; i < starTypes.percentage.length; i++) {
+    cumulative += starTypes.percentage[i];
+    if (rand < cumulative) return i;
+  }
+  return starTypes.percentage.length - 1;
+}
+
+function createStarTexture(): THREE.Texture {
+  const size = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  const center = size / 2;
+
+  // Wide soft outer glow
+  const outerGlow = ctx.createRadialGradient(center, center, 0, center, center, center);
+  outerGlow.addColorStop(0,   "rgba(255, 255, 255, 0.4)");
+  outerGlow.addColorStop(0.4, "rgba(255, 255, 255, 0.15)");
+  outerGlow.addColorStop(1.0, "rgba(255, 255, 255, 0)");
+  ctx.fillStyle = outerGlow;
+  ctx.fillRect(0, 0, size, size);
+
+  // Tight bright core
+  const core = ctx.createRadialGradient(center, center, 0, center, center, center * 0.25);
+  core.addColorStop(0,   "rgba(255, 255, 255, 1)");
+  core.addColorStop(0.5, "rgba(255, 255, 255, 0.8)");
+  core.addColorStop(1.0, "rgba(255, 255, 255, 0)");
+  ctx.fillStyle = core;
+  ctx.fillRect(0, 0, size, size);
+
+  return new THREE.CanvasTexture(canvas);
+}
+
 export class Galaxy {
-  stars: Star[] = [];
-  haze: Haze[] = [];
   scene: THREE.Scene;
   gui: GUI;
+
+  /** Rotate this in the animation loop. Stars AND zones live inside it. */
+  public group = new THREE.Group();
+
+  private starPointsMeshes: THREE.Points[] = [];
+  private hazePoints: THREE.Points | null = null;
+  private starTexture: THREE.Texture = createStarTexture();
+  private bloomLayer: number | null = null;
+
+  private zoneMap: ZoneMap | null = null;
+
   controls: {
     numStars: number;
     arms: number;
@@ -25,11 +74,14 @@ export class Galaxy {
     armYMean: number;
     spiral: number;
   };
+
   constructor(scene: THREE.Scene, gui: GUI) {
     this.scene = scene;
     this.gui = gui;
+    this.scene.add(this.group);
+
     this.controls = {
-      numStars: 8000,
+      numStars: 25000,
       arms: 1,
       galaxyThickness: 3.0,
       coreXDist: 50,
@@ -42,120 +94,152 @@ export class Galaxy {
       armYMean: 5,
       spiral: 0.8,
     };
-    const galaxyFolder = this.gui.addFolder('Galaxy');
-    galaxyFolder.add(this.controls, 'numStars', 3000, 20000, 250).onChange(() => {
-      this.generateStars();
-    }).listen();
-    galaxyFolder.add(this.controls, 'arms', 1, 10, 1).onChange(() => {
-      this.generateStars();
-    }).listen();
-    galaxyFolder.add(this.controls, 'galaxyThickness', 1, 10, 1).onChange(() => {
-      this.generateStars();
-    }).listen();
 
-    galaxyFolder.add(this.controls, 'coreXDist', 5, 300, 1).onChange(() => {
-      this.generateStars();
-    }).listen();
-    galaxyFolder.add(this.controls, 'coreYDist', 5, 300, 1).onChange(() => {
-      this.generateStars();
-    }).listen();
+    const regenerate = this.debounce(() => this.generateStars(), 150);
 
-    galaxyFolder.add(this.controls, 'outerCoreXDist', 5, 300, 1).onChange(() => {
-      this.generateStars();
-    }).listen();
-    galaxyFolder.add(this.controls, 'outerCoreYDist', 5, 300, 1).onChange(() => {
-      this.generateStars();
-    }).listen();
+    const galaxyFolder = this.gui.addFolder("Galaxy");
+    galaxyFolder.add(this.controls, "numStars", 10000, 50000, 250).onChange(regenerate).listen();
+    galaxyFolder.add(this.controls, "arms", 1, 10, 1).onChange(regenerate).listen();
+    galaxyFolder.add(this.controls, "galaxyThickness", 1, 10, 1).onChange(regenerate).listen();
+    galaxyFolder.add(this.controls, "coreXDist", 5, 300, 1).onChange(regenerate).listen();
+    galaxyFolder.add(this.controls, "coreYDist", 5, 300, 1).onChange(regenerate).listen();
+    galaxyFolder.add(this.controls, "outerCoreXDist", 5, 300, 1).onChange(regenerate).listen();
+    galaxyFolder.add(this.controls, "outerCoreYDist", 5, 300, 1).onChange(regenerate).listen();
+    galaxyFolder.add(this.controls, "armXDist", 5, 300, 1).onChange(regenerate).listen();
+    galaxyFolder.add(this.controls, "armYDist", 5, 300, 1).onChange(regenerate).listen();
+    galaxyFolder.add(this.controls, "armXMean", 5, 300, 1).onChange(regenerate).listen();
+    galaxyFolder.add(this.controls, "armYMean", 5, 300, 1).onChange(regenerate).listen();
+    galaxyFolder.add(this.controls, "spiral", 0.1, 5, 0.1).onChange(regenerate).listen();
+    galaxyFolder.open();
 
-    galaxyFolder.add(this.controls, 'armXDist', 5, 300, 1).onChange(() => {
-      this.generateStars();
-    }).listen();
-    galaxyFolder.add(this.controls, 'armYDist', 5, 300, 1).onChange(() => {
-      this.generateStars();
-    }).listen();
-
-    galaxyFolder.add(this.controls, 'armXMean', 5, 300, 1).onChange(() => {
-      this.generateStars();
-    }).listen();
-    galaxyFolder.add(this.controls, 'armYMean', 5, 300, 1).onChange(() => {
-      this.generateStars();
-    }).listen();
-
-    galaxyFolder.add(this.controls, 'spiral', 0.1, 5, 0.1).onChange(() => {
-      this.generateStars();
-    }).listen();
-
-    galaxyFolder.open()
     this.generateStars();
     this.generateSectors();
   }
+
+  private debounce(fn: () => void, delay: number) {
+    let timer: ReturnType<typeof setTimeout>;
+    return () => {
+      clearTimeout(timer);
+      timer = setTimeout(fn, delay);
+    };
+  }
+
+  enableBloom(layer: number) {
+    this.bloomLayer = layer;
+    this.applyBloom();
+  }
+
+  private applyBloom() {
+    if (this.bloomLayer === null) return;
+    for (const mesh of this.starPointsMeshes) {
+      mesh.layers.enable(this.bloomLayer);
+    }
+    if (this.hazePoints) {
+      this.hazePoints.layers.enable(this.bloomLayer);
+    }
+  }
+
   generateSectors() {
-    const triangleShape = new THREE.Shape()
-    .moveTo( 8000, 2000 )
-    .lineTo( 4000, 8000 )
-    .lineTo( 12000, 8000 )
-    .lineTo( 8000, 2000 );
-    const position = new THREE.Vector3(0, 0, 0);
-    const sector = new Sector("Authority", position, triangleShape);
-    sector.toThreeObject(this.scene)
+    this.zoneMap?.removeObject();
+    this.zoneMap = new ZoneMap(this.gui); // ← pass gui here
+    this.zoneMap.toThreeObject(this.group);
   }
-  updateScale(camera: THREE.Camera) {
-    this.stars.forEach((star) => {
-      star.updateScale(camera);
-    });
 
-    this.haze.forEach((haze) => {
-      haze.updateScale(camera);
-    });
-  }
   generateStars() {
-    this.stars.forEach((star) => star.removeObject());
-    this.haze.forEach((h) => h.removeObject());
-    let stars = [];
-    let hazes = [];
+    for (const mesh of this.starPointsMeshes) {
+      this.group.remove(mesh);
+      (mesh.geometry as THREE.BufferGeometry).dispose();
+      (mesh.material as THREE.Material).dispose();
+    }
+    this.starPointsMeshes = [];
 
-    for (let i = 0; i < this.controls.numStars / 4; i++) {
-      let pos = new THREE.Vector3(
-        gaussianRandom(0, this.controls.coreXDist),
-        gaussianRandom(0, this.controls.coreYDist),
-        gaussianRandom(0, this.controls.galaxyThickness)
-      );
-      let star = new Star(pos);
-      stars.push(star);
-      let haze = new Haze(pos);
-      hazes.push(haze);
+    if (this.hazePoints) {
+      this.group.remove(this.hazePoints);
+      (this.hazePoints.geometry as THREE.BufferGeometry).dispose();
+      (this.hazePoints.material as THREE.Material).dispose();
+      this.hazePoints = null;
     }
 
-    for (let i = 0; i < this.controls.numStars / 4; i++) {
-      let pos = new THREE.Vector3(
-        gaussianRandom(0, this.controls.outerCoreXDist),
-        gaussianRandom(0, this.controls.outerCoreYDist),
-        gaussianRandom(0, this.controls.galaxyThickness)
-      );
-      let star = new Star(pos);
-      stars.push(star);
-      let haze = new Haze(pos);
-      hazes.push(haze);
-    }
+    const positionsByType: number[][] = starTypes.percentage.map(() => []);
+    const hazePositions: number[] = [];
 
-    for (let j = 0; j < this.controls.arms; j++) {
-      for (let i = 0; i < this.controls.numStars / 4; i++) {
-        let pos = spiral(
-          gaussianRandom(this.controls.armXMean, this.controls.armXDist),
-          gaussianRandom(this.controls.armYMean, this.controls.armYDist),
-          gaussianRandom(0, this.controls.galaxyThickness),
-          (j * 2 * Math.PI) / this.controls.arms,
-          this.controls.armXDist,
-          this.controls.spiral,
+    const {
+      numStars, arms, galaxyThickness,
+      coreXDist, coreYDist, outerCoreXDist, outerCoreYDist,
+      armXDist, armYDist, armXMean, armYMean, spiral: spiralVal,
+    } = this.controls;
+
+    for (let i = 0; i < numStars / 4; i++) {
+      positionsByType[pickStarType()].push(
+        gaussianRandom(0, coreXDist),
+        gaussianRandom(0, coreYDist),
+        gaussianRandom(0, galaxyThickness)
+      );
+      positionsByType[pickStarType()].push(
+        gaussianRandom(0, outerCoreXDist),
+        gaussianRandom(0, outerCoreYDist),
+        gaussianRandom(0, galaxyThickness)
+      );
+      for (let j = 0; j < arms; j++) {
+        const pos = spiral(
+          gaussianRandom(armXMean, armXDist),
+          gaussianRandom(armYMean, armYDist),
+          gaussianRandom(0, galaxyThickness),
+          (j * 2 * Math.PI) / arms,
+          armXDist,
+          spiralVal
         );
-        let star = new Star(pos);
-        stars.push(star);
-        let haze = new Haze(pos);
-        hazes.push(haze);
+        positionsByType[pickStarType()].push(pos.x, pos.y, pos.z);
+        hazePositions.push(pos.x, pos.y, pos.z);
       }
     }
 
-    this.stars = stars;
-    this.stars.forEach((star) => star.toThreeObject(this.scene));
+    starTypes.percentage.forEach((_, typeIndex) => {
+      const positions = positionsByType[typeIndex];
+      if (positions.length === 0) return;
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+
+      const mat = new THREE.PointsMaterial({
+        color: starTypes.color[typeIndex],
+        size: starTypes.size[typeIndex] * 4,
+        sizeAttenuation: true,
+        map: this.starTexture,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+
+      const mesh = new THREE.Points(geo, mat);
+      this.group.add(mesh);
+      this.starPointsMeshes.push(mesh);
+    });
+
+    if (hazePositions.length > 0) {
+      const hazeGeo = new THREE.BufferGeometry();
+      hazeGeo.setAttribute("position", new THREE.Float32BufferAttribute(hazePositions, 3));
+
+      const hazeMat = new THREE.PointsMaterial({
+        color: 0x334466,
+        size: 6.0,
+        sizeAttenuation: true,
+        map: this.starTexture,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        opacity: 0.3,
+      });
+
+      this.hazePoints = new THREE.Points(hazeGeo, hazeMat);
+      this.group.add(this.hazePoints);
+    }
+
+    this.applyBloom();
+  }
+
+  dispose() {
+    this.zoneMap?.removeObject();
+    this.starTexture.dispose();
   }
 }

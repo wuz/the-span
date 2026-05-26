@@ -1,6 +1,6 @@
 // minimum and maximum star sizes
-export const STAR_MIN = 0.01;
-export const STAR_MAX = 1.0;
+export const STAR_MIN = 0.001;
+export const STAR_MAX = 0.5;
 
 export const HAZE_MAX = 30;
 export const HAZE_MIN = 10;

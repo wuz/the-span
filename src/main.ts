@@ -1,5 +1,4 @@
 import * as THREE from "three";
-
 import { CompositionShader } from "./shaders/CompositionShader";
 import {
   BASE_LAYER,
@@ -7,38 +6,42 @@ import {
   BLOOM_PARAMS,
   OVERLAY_LAYER,
 } from "./config/renderConfig.js";
-
-// Rendering
-import { MapControls } from 'three/examples/jsm/controls/MapControls';
+import { MapControls } from "three/examples/jsm/controls/MapControls";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass";
 import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass";
-import { GUI } from 'dat.gui'
+import { GUI } from "dat.gui";
 import { Galaxy } from "./galaxy";
 
-
-let canvas: HTMLCanvasElement | null,
-  renderer: THREE.Renderer,
+let canvas: HTMLCanvasElement,
+  renderer: THREE.WebGLRenderer,
   camera: THREE.PerspectiveCamera,
   scene: THREE.Scene,
-  orbit: THREE.MapControls,
-  baseComposer: THREE.EffectComposer,
-  bloomComposer: THREE.EffectComposer,
-  overlayComposer: THREE.EffectComposer,
-  cameraFolder: GUI,
+  orbit: MapControls,
+  baseComposer: EffectComposer,
+  bloomComposer: EffectComposer,
+  overlayComposer: EffectComposer,
+  bloomPass: UnrealBloomPass,
+  galaxy: Galaxy,
   gui: GUI;
 
-function initThree() {
-  // grab canvas
-  canvas = document.querySelector("#canvas");
-  
+const clock = new THREE.Clock();
 
-  // scene
+/** Controls exposed to the GUI for live tuning */
+const renderControls = {
+  bloomStrength: BLOOM_PARAMS.bloomStrength,
+  bloomRadius: BLOOM_PARAMS.bloomRadius,
+  bloomThreshold: BLOOM_PARAMS.bloomThreshold,
+  rotationSpeed: 0.02, // radians per second
+};
+
+function initThree() {
+  canvas = document.querySelector("#canvas")!;
+
   scene = new THREE.Scene();
   scene.fog = new THREE.FogExp2(0xebe2db, 0.00003);
 
-  // camera
   camera = new THREE.PerspectiveCamera(
     60,
     window.innerWidth / window.innerHeight,
@@ -49,9 +52,8 @@ function initThree() {
   camera.up.set(0, 0, 1);
   camera.lookAt(0, 0, 0);
 
-  // map orbit
   orbit = new MapControls(camera, canvas);
-  orbit.enableDamping = true; // an animation loop is required when either damping or auto-rotation are enabled
+  orbit.enableDamping = true;
   orbit.dampingFactor = 0.05;
   orbit.screenSpacePanning = false;
   orbit.minDistance = 1;
@@ -60,59 +62,111 @@ function initThree() {
 
   gui = new GUI();
   gui.close();
-  cameraFolder = gui.addFolder("Camera");
+
+  const cameraFolder = gui.addFolder("Camera");
   cameraFolder.add(camera.position, "x", -1000, 1000).listen();
   cameraFolder.add(camera.position, "y", -1000, 1000).listen();
   cameraFolder.add(camera.position, "z", -1000, 1000).listen();
 
+  // Live bloom tuning
+  const bloomFolder = gui.addFolder("Bloom");
+  bloomFolder
+    .add(renderControls, "bloomStrength", 0, 5, 0.05)
+    .listen()
+    .onChange((v: number) => { bloomPass.strength = v; });
+  bloomFolder
+    .add(renderControls, "bloomRadius", 0, 2, 0.05)
+    .listen()
+    .onChange((v: number) => { bloomPass.radius = v; });
+  bloomFolder
+    .add(renderControls, "bloomThreshold", 0, 1, 0.01)
+    .listen()
+    .onChange((v: number) => { bloomPass.threshold = v; });
+
+  // Rotation speed tuning
+  const animFolder = gui.addFolder("Animation");
+  animFolder.add(renderControls, "rotationSpeed", 0, 0.2, 0.001).listen();
+
   initRenderPipeline();
+  setupScreenshot();
+
+  // Create galaxy and enable bloom on all its star meshes
+  galaxy = new Galaxy(scene, gui);
+  galaxy.enableBloom(BLOOM_LAYER);
+
+  // Single unified animation loop — replaces both the old animate() and render()
+  renderer.setAnimationLoop(animate);
 }
 
 function animate() {
+  const delta = clock.getDelta();
+
   orbit.update();
-  renderer.render( scene, camera );
+
+  // Rotate the galaxy group around Z (the "up" axis in this scene)
+  // Stars in the group spin; sectors added directly to scene stay fixed
+  galaxy.group.rotation.z -= renderControls.rotationSpeed * delta;
+
+  handleResize();
+  renderPipeline();
+}
+
+function renderPipeline() {
+  // 1. Render only BLOOM_LAYER objects → bloom texture
+  camera.layers.set(BLOOM_LAYER);
+  bloomComposer.render();
+
+  // 2. Render only OVERLAY_LAYER objects → overlay texture
+  camera.layers.set(OVERLAY_LAYER);
+  overlayComposer.render();
+
+  // 3. Render BASE_LAYER and composite bloom + overlay on top
+  camera.layers.set(BASE_LAYER);
+  baseComposer.render();
+}
+
+function handleResize() {
+  const el = renderer.domElement;
+  const width = el.clientWidth;
+  const height = el.clientHeight;
+  if (el.width !== width || el.height !== height) {
+    renderer.setSize(width, height, false);
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+  }
 }
 
 function initRenderPipeline() {
-  // Assign Renderer
   renderer = new THREE.WebGLRenderer({
     antialias: true,
     canvas,
     logarithmicDepthBuffer: true,
+    preserveDrawingBuffer: true, // required for screenshot canvas.toBlob()
   });
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.outputEncoding = THREE.sRGBEncoding;
-  renderer.setAnimationLoop(animate);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 0.5;
 
-  // General-use rendering pass for chaining
   const renderScene = new RenderPass(scene, camera);
 
-  // Rendering pass for bloom
-  const bloomPass = new UnrealBloomPass(
+  bloomPass = new UnrealBloomPass(
     new THREE.Vector2(window.innerWidth, window.innerHeight),
-    1.5,
-    0.4,
-    0.85
+    BLOOM_PARAMS.bloomStrength,
+    BLOOM_PARAMS.bloomRadius,
+    BLOOM_PARAMS.bloomThreshold
   );
-  bloomPass.threshold = BLOOM_PARAMS.bloomThreshold;
-  bloomPass.strength = BLOOM_PARAMS.bloomStrength;
-  bloomPass.radius = BLOOM_PARAMS.bloomRadius;
 
-  // bloom composer
   bloomComposer = new EffectComposer(renderer);
   bloomComposer.renderToScreen = false;
   bloomComposer.addPass(renderScene);
   bloomComposer.addPass(bloomPass);
 
-  // overlay composer
   overlayComposer = new EffectComposer(renderer);
   overlayComposer.renderToScreen = false;
   overlayComposer.addPass(renderScene);
 
-  // Shader pass to combine base layer, bloom, and overlay layers
   const finalPass = new ShaderPass(
     new THREE.ShaderMaterial({
       uniforms: {
@@ -128,68 +182,27 @@ function initRenderPipeline() {
   );
   finalPass.needsSwap = true;
 
-  // base layer composer
   baseComposer = new EffectComposer(renderer);
   baseComposer.addPass(renderScene);
   baseComposer.addPass(finalPass);
 }
 
-function resizeRendererToDisplaySize(renderer: THREE.Renderer) {
-  const canvas = renderer.domElement;
-  const width = canvas.clientWidth;
-  const height = canvas.clientHeight;
-  const needResize = canvas.width !== width || canvas.height !== height;
-  if (needResize) {
-    renderer.setSize(width, height, false);
-  }
-  return needResize;
-}
-
-async function render() {
-  orbit.update();
-
-  // fix buffer size
-  if (resizeRendererToDisplaySize(renderer)) {
-    const canvas = renderer.domElement;
-    camera.aspect = canvas.clientWidth / canvas.clientHeight;
-    camera.updateProjectionMatrix();
-  }
-
-  // fix aspect ratio
-  const canvas = renderer.domElement;
-  camera.aspect = canvas.clientWidth / canvas.clientHeight;
-  camera.updateProjectionMatrix();
-
-  galaxy.stars.forEach((star) => {
-    star.updateScale(camera);
+function setupScreenshot() {
+  const elem = document.querySelector("#screenshot");
+  elem?.addEventListener("click", () => {
+    renderPipeline(); // ensure latest frame is in buffer
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const a = document.createElement("a");
+      document.body.appendChild(a);
+      a.style.display = "none";
+      const fileName = `screencapture-${canvas.width}x${canvas.height}.png`;
+      a.href = window.URL.createObjectURL(blob);
+      a.download = fileName;
+      a.click();
+      a.parentElement?.removeChild(a);
+    });
   });
-
-  galaxy.haze.forEach((haze) => {
-    haze.updateScale(camera);
-  });
-
-  // Run each pass of the render pipeline
-  renderPipeline();
-
-  requestAnimationFrame(render);
-}
-
-function renderPipeline() {
-  // Render bloom
-  camera.layers.set(BLOOM_LAYER);
-  bloomComposer.render();
-
-  // Render overlays
-  camera.layers.set(OVERLAY_LAYER);
-  overlayComposer.render();
-
-  // Render normal
-  camera.layers.set(BASE_LAYER);
-  baseComposer.render();
 }
 
 initThree();
-
-let galaxy = new Galaxy(scene, gui);
-
-requestAnimationFrame(render);
